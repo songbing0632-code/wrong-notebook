@@ -15,7 +15,8 @@ import { resolveNotebookForSubject } from "@/lib/notebook-resolver";
 import { scheduleMasteryEvaluation } from "@/lib/mastery";
 import { findDuplicateQuestion, recordDuplicateQuestion, runQuestionImportTransaction } from "@/lib/question-deduplication";
 import { MAX_FIGURE_SVG_LENGTH, sanitizeFigureSvg } from "@/lib/figure-svg";
-import { getDefaultPaperLevel } from "@/lib/paper-level";
+import { getDefaultPaperLevelGroupId, ensureDefaultPaperGroups } from "@/lib/paper-level";
+import { DEFAULT_FIGURE_SCALE, MAX_FIGURE_SCALE, MIN_FIGURE_SCALE } from "@/lib/figure-scale";
 
 const logger = createLogger('api:error-items');
 
@@ -39,6 +40,7 @@ const importSchema = z.object({
     difficultyStars: z.number().int().min(1).max(5).nullish(),
     hasFigure: z.boolean().optional(),
     figureSvg: z.string().max(MAX_FIGURE_SVG_LENGTH).nullish(),
+    figureScale: z.number().int().min(MIN_FIGURE_SCALE).max(MAX_FIGURE_SCALE).default(DEFAULT_FIGURE_SCALE),
     geogebraCommands: z.string().nullish(),
 });
 
@@ -106,6 +108,19 @@ export async function POST(req: Request) {
             return unauthorized("No user found in DB");
         }
 
+        // 校验传入的 paperLevel 是否有效（不创建分组，分组在事务内按需创建）
+        let resolvedPaperLevel: string | null = null;
+        if (paperLevel !== null && paperLevel !== undefined) {
+            const group = await prisma.paperGroup.findFirst({
+                where: { id: paperLevel, userId: user.id, isActive: true },
+                select: { id: true },
+            });
+            if (!group) {
+                return validationError('Invalid paperLevel', [{ code: 'invalid_paper_level', path: ['paperLevel'], message: 'Invalid paper level' }]);
+            }
+            resolvedPaperLevel = group.id;
+        }
+
         const duplicateBeforeRecognition = needsQuestionGradeRecognition(user, body)
             ? await findDuplicateQuestion(prisma, user.id, body) : null;
         const gradeResult = await prepareImportGrade(user, body, duplicateBeforeRecognition !== null);
@@ -114,6 +129,12 @@ export async function POST(req: Request) {
         const result = await runQuestionImportTransaction(async (tx) => {
             const duplicate = await findDuplicateQuestion(tx, user.id, body);
             if (duplicate) return recordDuplicateQuestion(tx, user.id, duplicate, body);
+
+            // 事务内确保默认分组存在（并发安全），并解析默认卷别
+            if (resolvedPaperLevel === null) {
+                await ensureDefaultPaperGroups(user.id, tx);
+                resolvedPaperLevel = await getDefaultPaperLevelGroupId(user.id, difficultyStars, tx);
+            }
 
             // 未指定错题本时，按学科名匹配或新建错题本
             let subjectId: string | undefined = requestedSubjectId || undefined;
@@ -132,12 +153,14 @@ export async function POST(req: Request) {
             const subjectKey = inferSubjectFromName(subject?.name ?? null) || 'other';
             logger.debug({ subjectId, subjectName: subject?.name, subjectKey }, 'Subject inferred');
 
-            // 处理每个标签
+            // 处理每个标签（限定在当前错题本的标签体系内）
+            const notebookTagSet = subject?.tagSet || 'default';
             for (const tagName of tagNames) {
                 try {
                     let tag = await tx.knowledgeTag.findFirst({
                         where: {
                             name: tagName,
+                            tagSet: notebookTagSet,
                             OR: [
                                 { isSystem: true },
                                 { userId: user.id },
@@ -146,8 +169,8 @@ export async function POST(req: Request) {
                     });
 
                     if (!tag) {
-                        const parentId = await findParentTagIdForGrade(finalGradeSemester, subjectKey, tx);
-                        logger.debug({ tagName, parentId, subjectKey }, 'Creating new custom tag');
+                        const parentId = await findParentTagIdForGrade(finalGradeSemester, subjectKey, tx, notebookTagSet);
+                        logger.debug({ tagName, parentId, subjectKey, tagSet: notebookTagSet }, 'Creating new custom tag');
 
                         tag = await tx.knowledgeTag.create({
                             data: {
@@ -156,6 +179,7 @@ export async function POST(req: Request) {
                                 isSystem: false,
                                 userId: user.id,
                                 parentId: parentId,
+                                tagSet: notebookTagSet,
                             },
                         });
                         logger.debug({ tagId: tag.id, tagName }, 'Custom tag created');
@@ -188,10 +212,11 @@ export async function POST(req: Request) {
                         mistakeStatus: normalizeMistakeStatusForSave(mistakeStatus, wrongAnswerText),
                         knowledgePoints: JSON.stringify(tagNames),
                         gradeSemester: finalGradeSemester,
-                        paperLevel: paperLevel ?? getDefaultPaperLevel(difficultyStars),
+                        paperLevel: resolvedPaperLevel,
                         difficultyStars: difficultyStars ?? null,
                         hasFigure,
                         figureSvg,
+                        figureScale: body.figureScale,
                         geogebraCommands: geogebraCommands || null,
                         masteryLevel: 0,
                         tags: {

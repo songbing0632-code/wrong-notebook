@@ -6,7 +6,7 @@ Web export is for moving personal learning data; restoring a whole site requires
 
 | Method | Contents | Use |
 | --- | --- | --- |
-| Web JSON export | Notebooks, custom tags, questions, review schedules, practice records, random exam papers and some profile data | Keeping personal data, importing supported fields |
+| Web JSON export | Notebooks, system and custom tags, questions, review schedules, practice records, random exam papers and some profile data | Keeping personal data, importing supported fields |
 | Full-site file backup | The complete SQLite database, `config/`, deployment configuration and any certificates | Disaster recovery, moving the site, preparing a rollback before upgrades |
 
 The JSON export does not include full user accounts with passwords or the server AI configuration. Even when an admin exports all data, it does not replace a full-site backup.
@@ -15,6 +15,8 @@ The JSON export does not include full user accounts with passwords or the server
 
 Export JSON from the data management section in the settings and keep it safe. When a regular user imports, the email in the export file must match the current account; admins can import and export data for all users.
 
+System and custom tags retain their tag system and parent-child hierarchy. Identically named chapters and knowledge points under different grades are restored separately, and questions reconnect to the specific nodes recorded in the backup. This includes Chinese grades, chapters, knowledge points and custom tags beneath them. Import supports older backups whose child nodes appear before their parents; repeating an import does not duplicate tags at the same path.
+
 Question figures, GeoGebra demos, Chinese and English SVG animations with their synthesized cloud voice (MP3), the latest similar question and mastery probability are all restored from the export file; SVG is sanitized again on import, and questions without a mastery probability are re-evaluated after import. Exam papers are restored together with their questions and every recorded result; questions still being generated at export time show as failed after import and can be regenerated on the exam page. Importing your own export file also restores preferences such as the question grade rule and fixed grade, review before import, the duplicate threshold, GeoGebra demos, SVG animations and the interface theme.
 
 Import merges existing notebooks and tags and handles duplicates by question similarity. A duplicate may add another wrong attempt under the existing question, so importing the same file repeatedly can change the practice history.
@@ -22,6 +24,8 @@ Import merges existing notebooks and tags and handles duplicates by question sim
 Keep the original backup before importing, and afterwards check the new questions, tags, duplicate count and answer history. To restore to an exact point in time, use a file backup.
 
 Restoring a backup keeps each question's original grade and does not apply the current entry rule. Old backups without a grade rule leave your current account settings unchanged.
+
+Each mistake's figure display scale is exported and restored for its details page and text printouts. Older backups with no scale, or an invalid value, use the default 100%.
 
 ## Docker full-site backup
 

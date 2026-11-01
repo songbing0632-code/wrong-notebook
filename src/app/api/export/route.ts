@@ -6,7 +6,9 @@ import { unauthorized, internalError, forbidden } from "@/lib/api-errors";
 import { createLogger } from "@/lib/logger";
 import { getAppTimeZone } from "@/lib/config";
 import { formatDateTime } from "@/lib/date-time";
+import { normalizeFigureScale } from "@/lib/figure-scale";
 import { exportSpeeches } from "@/lib/tts/speech-cache";
+import { sortTagsByParent } from "@/lib/tag-hierarchy";
 
 const logger = createLogger('api:export');
 
@@ -40,6 +42,12 @@ export async function GET(req: Request) {
             where: userFilter,
         });
 
+        // 系统标签按 tagSet 分组导出，避免不同体系的系统标签混淆
+        const systemTags = await prisma.knowledgeTag.findMany({
+            where: {
+                isSystem: true,
+            },
+        });
         const customTags = await prisma.knowledgeTag.findMany({
             where: {
                 ...userFilter,
@@ -71,6 +79,10 @@ export async function GET(req: Request) {
             },
         });
 
+        const paperGroups = await prisma.paperGroup.findMany({
+            where: userFilter,
+        });
+
         // 与动画讲解文字一致的云端语音（MP3），导入后无需重新合成
         const ttsSpeeches = await exportSpeeches(errorItems.flatMap((item) => [
             ...(item.svgAnimation ? [{ language: 'zh' as const, svg: item.svgAnimation }] : []),
@@ -78,7 +90,7 @@ export async function GET(req: Request) {
         ]));
 
         const exportData = {
-            version: 2,
+            version: 3,
             exportedAt: new Date().toISOString(),
             scope: exportAll ? 'all' : 'user',
             user: {
@@ -98,11 +110,13 @@ export async function GET(req: Request) {
                 themePreference: user.themePreference,
             },
             subjects,
-            customTags,
-            errorItems,
+            systemTags: sortTagsByParent(systemTags),
+            customTags: sortTagsByParent(customTags),
+            errorItems: errorItems.map((item) => ({ ...item, figureScale: normalizeFigureScale(item.figureScale) })),
             reviewSchedules,
             practiceRecords,
             examPapers,
+            paperGroups,
             ttsSpeeches,
         };
 
@@ -110,6 +124,7 @@ export async function GET(req: Request) {
             userId: user.id,
             scope: exportAll ? 'all' : 'user',
             subjectsCount: subjects.length,
+            systemTagsCount: systemTags.length,
             customTagsCount: customTags.length,
             errorItemsCount: errorItems.length,
             reviewSchedulesCount: reviewSchedules.length,

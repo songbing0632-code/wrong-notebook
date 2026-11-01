@@ -16,11 +16,13 @@ import { GRADE_SEMESTERS } from "@/lib/grade-options";
 import { findDuplicateQuestion, recordDuplicateQuestion } from "@/lib/question-deduplication";
 import { parseDifficultyStars } from "@/lib/ai/schema";
 import { resolveNotebookScope } from "@/lib/notebook-scope";
+import { sortTagsByParent } from "@/lib/tag-hierarchy";
 import { sanitizeFigureSvg } from "@/lib/figure-svg";
+import { normalizeFigureScale } from "@/lib/figure-scale";
 import { sanitizeSvgAnimation } from "@/lib/svg-animation";
 import { importSpeeches } from "@/lib/tts/speech-cache";
 import { parseLastPractice } from "@/lib/last-practice";
-import { getDefaultPaperLevel } from "@/lib/paper-level";
+import { getDefaultPaperLevelGroupId, ensureDefaultPaperGroups } from "@/lib/paper-level";
 import { EXAM_DIFFICULTIES, EXAM_SCOPES, summarizePaperStatus } from "@/lib/exam";
 import type { Prisma } from "@prisma/client";
 
@@ -52,7 +54,20 @@ interface ImportData {
         name: string;
         stage?: string | null;      // 旧版导出文件没有
         subjectKey?: string | null; // 旧版导出文件没有
+        tagSet?: string;            // 旧版导出文件没有，缺省 default
         userId: string;
+        createdAt: string;
+        updatedAt: string;
+    }>;
+    systemTags?: Array<{ // version 3 起导出
+        id: string;
+        name: string;
+        subject: string;
+        parentId: string | null;
+        order: number;
+        code: string | null;
+        isSystem: boolean;
+        tagSet: string;
         createdAt: string;
         updatedAt: string;
     }>;
@@ -64,6 +79,7 @@ interface ImportData {
         order: number;
         code: string | null;
         isSystem: boolean;
+        tagSet?: string;            // 旧版导出文件没有，缺省 default
         userId: string;
         createdAt: string;
         updatedAt: string;
@@ -91,6 +107,7 @@ interface ImportData {
         difficultyStars?: number | null; // 旧版导出文件没有该字段
         hasFigure?: boolean;             // 旧版导出文件没有该字段
         figureSvg?: string | null;       // 旧版导出文件没有该字段
+        figureScale?: number;           // 旧版备份缺省为 100%
         // 以下字段 version 2 起导入，version 1 文件中即使有也按同样规则处理
         geogebraCommands?: string | null;
         svgAnimation?: string | null;
@@ -156,6 +173,17 @@ interface ImportData {
             figureSvg: string | null;
             error: string | null;
         }>;
+    }>;
+    /** 卷别分组，version 3 起导出 */
+    paperGroups?: Array<{
+        id: string;
+        userId: string;
+        key: string | null;
+        name: string;
+        order: number;
+        isActive: boolean;
+        createdAt: string;
+        updatedAt: string;
     }>;
     /** 动画讲解的云端语音（服务商、模型、音色、文字与 Base64 编码的 MP3），写入语音缓存 */
     ttsSpeeches?: unknown;
@@ -303,6 +331,7 @@ export async function POST(req: Request) {
                             name: subject.name,
                             stage: scope.stage,
                             subjectKey: scope.subject,
+                            tagSet: subject.tagSet || 'default',
                             userId: targetUserId,
                         },
                     });
@@ -311,32 +340,64 @@ export async function POST(req: Request) {
                 }
             }
 
-            // 2. 导入 custom tags
-            const tagIdMap = new Map<string, string>();
-            for (const tag of (body.customTags || [])) {
-                const targetUserId = importAll ? tag.userId : user.id;
+            // 2. 按体系和父节点路径导入，保留不同年级下的同名章节与知识点。
+            const systemTagIdMap = new Map<string, string>();
+            for (const tag of sortTagsByParent(body.systemTags || [])) {
+                const parentId = tag.parentId ? systemTagIdMap.get(tag.parentId) ?? null : null;
                 const existing = await tx.knowledgeTag.findFirst({
                     where: {
                         name: tag.name,
+                        subject: tag.subject,
+                        isSystem: true,
+                        tagSet: tag.tagSet || 'default',
+                        parentId,
+                    },
+                });
+                if (existing) {
+                    systemTagIdMap.set(tag.id, existing.id);
+                } else {
+                    const created = await tx.knowledgeTag.create({
+                        data: {
+                            name: tag.name,
+                            subject: tag.subject,
+                            isSystem: true,
+                            tagSet: tag.tagSet || 'default',
+                            parentId,
+                            order: tag.order || 0,
+                            code: tag.code,
+                        },
+                    });
+                    systemTagIdMap.set(tag.id, created.id);
+                }
+            }
+
+            // 3. 导入 custom tags
+            const tagIdMap = new Map<string, string>();
+            for (const tag of sortTagsByParent(body.customTags || [])) {
+                const targetUserId = importAll ? tag.userId : user.id;
+                const tagSet = tag.tagSet || 'default';
+                const parentId = tag.parentId ? tagIdMap.get(tag.parentId) ?? systemTagIdMap.get(tag.parentId) ?? null : null;
+                const existing = await tx.knowledgeTag.findFirst({
+                    where: {
+                        name: tag.name,
+                        subject: tag.subject,
                         userId: targetUserId,
                         isSystem: false,
+                        tagSet,
+                        parentId,
                     },
                 });
                 if (existing) {
                     tagIdMap.set(tag.id, existing.id);
                 } else {
-                    let newParentId: string | undefined;
-                    if (tag.parentId && tagIdMap.has(tag.parentId)) {
-                        newParentId = tagIdMap.get(tag.parentId);
-                    }
-
                     const created = await tx.knowledgeTag.create({
                         data: {
                             name: tag.name,
                             subject: tag.subject,
                             isSystem: false,
                             userId: targetUserId,
-                            parentId: newParentId,
+                            tagSet: tag.tagSet || 'default',
+                            parentId,
                             order: tag.order || 0,
                             code: tag.code,
                         },
@@ -346,7 +407,14 @@ export async function POST(req: Request) {
                 }
             }
 
-            // 3. 预加载所有需要的 tags（批量查询，避免 N+1）
+            // 4. 预加载所有需要的 tags（批量查询，避免 N+1）
+            // tagSet 映射：subject ID → tagSet，用于错题按错题本 tagSet 匹配系统标签
+            const subjectTagSetMap = new Map<string, string>();
+            for (const subject of (body.subjects || [])) {
+                if (subject.tagSet) {
+                    subjectTagSetMap.set(subject.id, subject.tagSet);
+                }
+            }
             const allTagNames = new Set<string>();
             for (const item of body.errorItems) {
                 if (item.tags) {
@@ -365,6 +433,15 @@ export async function POST(req: Request) {
                     ],
                 },
             });
+            // 按 (tagSet, name) 建索引，错题关联时按错题本 tagSet 精确匹配系统标签
+            const tagBySetAndName = new Map<string, string>();
+            for (const tag of preloadedTags) {
+                const key = `${tag.tagSet}::${tag.name}`;
+                if (!tagBySetAndName.has(key) || (!importAll && tag.userId === user.id)) {
+                    tagBySetAndName.set(key, tag.id);
+                }
+            }
+            // 兼容旧版导出文件：不区分 tagSet 时按名字兜底
             const tagNameMap = new Map<string, string>();
             for (const tag of preloadedTags) {
                 if (!tagNameMap.has(tag.name) || (!importAll && tag.userId === user.id)) {
@@ -375,6 +452,50 @@ export async function POST(req: Request) {
             // 4. 导入 error items
             const errorItemIdMap = new Map<string, string>();
             const errorItemOwnerMap = new Map<string, string>();
+
+            // 4.0 预导入卷别分组（paperGroups），建立 id 映射
+            const paperGroupIdMap = new Map<string, string>();
+            for (const group of (body.paperGroups || [])) {
+                const targetUserId = importAll ? group.userId : user.id;
+                const existing = await tx.paperGroup.findFirst({
+                    where: { id: group.id, userId: targetUserId },
+                });
+                if (existing) {
+                    paperGroupIdMap.set(group.id, existing.id);
+                } else {
+                    // 按 name 匹配，避免重复创建
+                    const byName = await tx.paperGroup.findFirst({
+                        where: { name: group.name, userId: targetUserId },
+                    });
+                    if (byName) {
+                        paperGroupIdMap.set(group.id, byName.id);
+                    } else {
+                        const created = await tx.paperGroup.create({
+                            data: {
+                                userId: targetUserId,
+                                key: group.key,
+                                name: group.name,
+                                order: group.order || 0,
+                                isActive: group.isActive !== false,
+                            },
+                        });
+                        paperGroupIdMap.set(group.id, created.id);
+                    }
+                }
+            }
+
+            // 兼容旧版备份：为每个有错题的用户确保默认分组存在
+            const legacyLevelMap = new Map<string, string>();
+            for (const item of body.errorItems) {
+                const targetUserId = importAll ? item.userId : user.id;
+                if (!legacyLevelMap.has(`${targetUserId}:a`)) {
+                    const defaults = await ensureDefaultPaperGroups(targetUserId, tx);
+                    legacyLevelMap.set(`${targetUserId}:a`, defaults.a || "");
+                    legacyLevelMap.set(`${targetUserId}:b`, defaults.b || "");
+                    legacyLevelMap.set(`${targetUserId}:other`, defaults.other || "");
+                }
+            }
+
             for (const item of body.errorItems) {
                 const targetUserId = importAll ? item.userId : user.id;
                 errorItemOwnerMap.set(item.id, targetUserId);
@@ -397,6 +518,27 @@ export async function POST(req: Request) {
                 const difficultyStars = parseDifficultyStars(item.difficultyStars);
                 const masteryProbability = safeMasteryProbability(item.masteryProbability);
                 const masteryEvaluatedAt = masteryProbability === null ? undefined : safeParseDate(item.masteryEvaluatedAt);
+
+                // 解析 paperLevel：优先查 paperGroupIdMap，其次查 legacyLevelMap，最后按星级推荐
+                let resolvedPaperLevel: string | null = null;
+                const rawPaperLevel = item.paperLevel;
+                if (rawPaperLevel) {
+                    if (paperGroupIdMap.has(rawPaperLevel)) {
+                        resolvedPaperLevel = paperGroupIdMap.get(rawPaperLevel)!;
+                    } else if (legacyLevelMap.has(`${targetUserId}:${rawPaperLevel}`)) {
+                        resolvedPaperLevel = legacyLevelMap.get(`${targetUserId}:${rawPaperLevel}`) || null;
+                    } else {
+                        // 尝试按 id 直接查（同用户）
+                        const direct = await tx.paperGroup.findFirst({
+                            where: { id: rawPaperLevel, userId: targetUserId },
+                        });
+                        resolvedPaperLevel = direct?.id || null;
+                    }
+                }
+                if (!resolvedPaperLevel && difficultyStars !== null) {
+                    resolvedPaperLevel = await getDefaultPaperLevelGroupId(targetUserId, difficultyStars, tx);
+                }
+
                 const created = await tx.errorItem.create({
                     data: {
                         shortId: keepShortId ? item.shortId : await generateUniqueShortId(tx),
@@ -416,10 +558,11 @@ export async function POST(req: Request) {
                         userNotes: item.userNotes,
                         masteryLevel: safeMasteryLevel(item.masteryLevel),
                         gradeSemester: item.gradeSemester,
-                        paperLevel: item.paperLevel ?? getDefaultPaperLevel(difficultyStars),
+                        paperLevel: resolvedPaperLevel,
                         difficultyStars,
                         hasFigure: item.hasFigure === true || sanitizeFigureSvg(item.figureSvg) !== null,
                         figureSvg: sanitizeFigureSvg(item.figureSvg),
+                        figureScale: normalizeFigureScale(item.figureScale),
                         geogebraCommands: typeof item.geogebraCommands === 'string' && item.geogebraCommands ? item.geogebraCommands : null,
                         svgAnimation: sanitizeSvgAnimation(item.svgAnimation),
                         svgAnimationEn: sanitizeSvgAnimation(item.svgAnimationEn),
@@ -439,14 +582,22 @@ export async function POST(req: Request) {
                 if (created.masteryEvaluatedAt) evaluatedIds.add(created.id);
                 stats.errorItemsCreated++;
 
-                // 关联 tags
+                // 关联 tags：优先按备份 ID 还原具体节点，旧备份再按体系和名字兜底。
                 if (item.tags && item.tags.length > 0) {
+                    const itemTagSet = (item.subjectId && subjectTagSetMap.get(item.subjectId)) || 'default';
                     const tagConnections: { id: string }[] = [];
                     for (const tag of item.tags) {
                         if (tagIdMap.has(tag.id)) {
                             tagConnections.push({ id: tagIdMap.get(tag.id)! });
-                        } else if (tagNameMap.has(tag.name)) {
-                            tagConnections.push({ id: tagNameMap.get(tag.name)! });
+                        } else if (systemTagIdMap.has(tag.id)) {
+                            tagConnections.push({ id: systemTagIdMap.get(tag.id)! });
+                        } else {
+                            const bySet = tagBySetAndName.get(`${itemTagSet}::${tag.name}`);
+                            const byName = tagNameMap.get(tag.name);
+                            const matched = bySet || byName;
+                            if (matched) {
+                                tagConnections.push({ id: matched });
+                            }
                         }
                     }
 

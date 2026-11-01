@@ -59,7 +59,7 @@ The home page offers photo upload, manual input and direct entry, with drag-and-
 
 ![Photo upload, manual input, direct entry, clipboard paste and screenshot on the home page](doc/screenshots/en/upload.png)
 
-General settings control review before import, the per-user grade rule (fixed grade or AI recognition), SVG animated explanations, GeoGebra demos, the similarity threshold for duplicate detection and the mastered threshold.
+General settings control review before import, the per-user grade rule (fixed grade or AI recognition), SVG animated explanations, GeoGebra demos, the similarity threshold for duplicate detection and the mastered threshold. Paper groups (A/B/Other) can be customized in settings: rename default groups, add custom groups (e.g. Unit Test, Midterm, Final), deactivate or delete custom groups.
 
 ![Review before import, animated explanations, GeoGebra and duplicate threshold in General settings](doc/screenshots/en/preferences.png)
 
@@ -141,9 +141,9 @@ Practice statistics show total practice, accuracy and active months, with distri
 
 - **∑ LaTeX formulas**: formulas in questions, answers and analyses are rendered with KaTeX, supporting `$…$`, `$$…$$`, `\(…\)` and `\[…\]`; switch between source and preview while editing. When a formula has syntax errors, a **Fix LaTeX** button appears and AI fixes only the formula syntax.
 - **📝 Regenerate the solution**: **Regenerate full solution** on the details page asks AI to rewrite the answer and analysis (with confirmation before overwriting); knowledge points and the cause of the mistake stay unchanged.
-- **🖼️ Question figures**: during recognition AI redraws figures as SVG, which is used on the details page, in printouts and in exams. Check the original photo with "View original image", or replace and add photos.
+- **🖼️ Question figures**: during recognition AI redraws figures as SVG, which is used on the details page, in printouts and in exams. For a saved mistake with a figure, set **Figure display scale** on its details page (10–200%, default 100%). The saved scale applies to that question's display and text printouts and is restored from backups. Check the original photo with "View original image", or replace and add photos.
 - **⭐ Difficulty stars**: on import AI rates difficulty from 1 to 5 stars following the star scale of a well-known Chinese math competition textbook series (1–2 stars: textbook and school extension, 3–4: regular math olympiad, 5: hardest competition problems). You can change it manually; questions with 4 stars or more go to paper B by default.
-- **🏷️ Knowledge-point tags**: each notebook is created for a school stage (primary / junior high / senior high) and a subject (cannot be changed later). AI picks tags from all knowledge points of that stage and subject. Custom tags are supported, and AI can re-tag the knowledge points and difficulty of one question or a whole notebook.
+- **🏷️ Knowledge-point tags**: each notebook is created for a school stage (primary / junior high / senior high) and a subject (cannot be changed later). Primary school supports math, English and Chinese; the built-in Chinese chapters and knowledge points cover grades 1–6, junior high and senior high. AI picks tags from all knowledge points of that stage and subject. Custom tags are supported, and AI can re-tag the knowledge points and difficulty of one question or a whole notebook.
 
 ### Explanations and demos
 
@@ -165,7 +165,7 @@ Practice statistics show total practice, accuracy and active months, with distri
 - **🔍 Filters**: filter by mastery, date range, knowledge point, grade and term, paper level and more; supports bulk actions and comparing the similarity of two questions.
 - **📊 Statistics**: mastery rate, monthly trend and subject distribution for both mistakes and practice.
 - **⏳ Background tasks**: the button at the bottom right shows the progress of long-running jobs such as recognition, AI generation, animation voice, bulk tagging and exam generation. Jobs keep running on the server after you leave the page.
-- **💾 Import and export**: export or import data backups in **Settings**, including notebooks, questions, practice and answer records, exams, personal preferences and synthesized cloud voice; account credentials and AI settings are not included.
+- **💾 Import and export**: export or import data backups in **Settings**, including notebooks, questions, system and custom tags, practice and answer records, exams, personal preferences and synthesized cloud voice. Tags are restored by tag system and parent path, keeping identically named chapters and knowledge points under different grades separate and reconnecting questions to their specific tag nodes. Account credentials and AI settings are not included.
 - **🌗 Dark mode**: the theme button in the top navigation bar switches between Auto (follow system), Light and Dark; Auto is the default. The choice is saved per account, so it carries over when you sign in on another device.
 - **🕒 Application time zone**: Beijing time by default and changeable by administrators; dates and statistics follow the application time zone. See [TIME_ZONE.md](doc/TIME_ZONE.md) (Chinese).
 - **🔑 One-time setup link**: fresh installs no longer ship an admin with a fixed password. On first start the server generates a setup link that works only once; open it to choose the admin email and password. The desktop and standalone Android apps open it automatically; on fnOS you enter the admin email and password in the install wizard instead; Docker, npm and source runs print it in the startup log (the token is also in `config/setup-token` in the data directory). Instances upgraded from earlier versions keep their accounts.
@@ -246,7 +246,7 @@ Every release publishes an image to GitHub Container Registry, `ghcr.io/margrop/
 
 3. **Sign in**: open `http://your-ip-or-domain:3000`.
 
-4. **Upgrade**: pull the new image and recreate the container. Data stays in the mounted directories; on startup only database migrations run. Back up the `data/` directory before upgrading.
+4. **Upgrade**: pull the new image and recreate the container. Data stays in the mounted directories; startup runs database migrations and fills in missing built-in Chinese tags while preserving existing tag IDs and question links. Back up the `data/` directory before upgrading.
 
    ```bash
    docker compose pull && docker compose up -d
@@ -514,6 +514,7 @@ The `scripts/` directory contains maintenance and debugging scripts, for example
 - **Reset a password**: `node scripts/reset-password.js <email> <new-password>`
 - **Restore the default admin role**: `node scripts/seed-admin.js` (only restores the admin role and re-enables an existing `admin@localhost`; when no admin exists, restarting the server prints a new setup link in the log)
 - **Rebuild system knowledge points**: `npx ts-node --compiler-options '{"module":"CommonJS"}' scripts/rebuild-system-tags.ts` (keeps custom tags and question links; back up before running in production)
+- **Fill in Chinese knowledge points**: `npx ts-node --compiler-options '{"module":"CommonJS"}' scripts/seed-chinese-primary.ts` (uses the same curriculum source as the app, adds missing built-in Chinese tags and updates their curriculum order while preserving tag IDs, question links, custom tags and other tag systems; safe to repeat). Docker and installation packages run the compiled `dist-scripts/scripts/seed-chinese-primary.js` at startup, so existing installations do not need a full tag rebuild.
 - **Inspect the database**: `node scripts/check-db-users.js`, `node scripts/check-db-data.js`
 
 ### Documentation

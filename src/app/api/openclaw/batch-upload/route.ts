@@ -13,7 +13,7 @@ import { generateUniqueShortId } from "@/lib/short-id";
 import { scheduleMasteryEvaluation } from "@/lib/mastery";
 import { findDuplicateQuestion, recordDuplicateQuestion, runQuestionImportTransaction } from "@/lib/question-deduplication";
 import { parseDifficultyStars } from "@/lib/ai/schema";
-import { getDefaultPaperLevel } from "@/lib/paper-level";
+import { getDefaultPaperLevelGroupId, ensureDefaultPaperGroups } from "@/lib/paper-level";
 import { getErrorMessage } from "@/lib/error-message";
 
 const logger = createLogger('api:openclaw:batch-upload');
@@ -151,12 +151,14 @@ async function createErrorItem(
 
         const subject = subjectId ? await tx.subject.findUnique({ where: { id: subjectId } }) : null;
         const subjectKey = subject ? inferSubjectFromName(subject.name) : null;
+        const notebookTagSet = subject?.tagSet || 'default';
 
         for (const tagName of tagNames) {
             try {
                 let tag = await tx.knowledgeTag.findFirst({
                     where: {
                         name: tagName,
+                        tagSet: notebookTagSet,
                         OR: [
                             { isSystem: true },
                             { userId: userId },
@@ -166,7 +168,7 @@ async function createErrorItem(
 
                 if (!tag) {
                     const parentId = finalGradeSemester && subjectKey
-                        ? await findParentTagIdForGrade(finalGradeSemester, subjectKey, tx)
+                        ? await findParentTagIdForGrade(finalGradeSemester, subjectKey, tx, notebookTagSet)
                         : null;
 
                     tag = await tx.knowledgeTag.create({
@@ -176,6 +178,7 @@ async function createErrorItem(
                             isSystem: false,
                             userId: userId,
                             parentId: parentId || undefined,
+                            tagSet: notebookTagSet,
                         },
                     });
                 }
@@ -185,6 +188,10 @@ async function createErrorItem(
                 logger.error({ tagName, error: tagError }, 'Error processing tag');
             }
         }
+
+        // 事务内确保默认分组存在（并发安全），并解析默认卷别
+        await ensureDefaultPaperGroups(userId, tx);
+        const defaultPaperLevel = await getDefaultPaperLevelGroupId(userId, difficultyStars, tx);
 
         const errorItem = await tx.errorItem.create({
             data: {
@@ -198,7 +205,7 @@ async function createErrorItem(
                 analysis: analysis || null,
                 knowledgePoints: JSON.stringify(tagNames),
                 gradeSemester: finalGradeSemester,
-                paperLevel: getDefaultPaperLevel(difficultyStars),
+                paperLevel: defaultPaperLevel,
                 difficultyStars,
                 errorType: errorType || null,
                 source: source || 'Openclaw',
